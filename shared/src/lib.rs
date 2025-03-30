@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod channel;
+
 #[derive(Debug, Error)]
 pub enum ChatError {
     #[error("Network error: {0}")]
