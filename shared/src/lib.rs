@@ -35,7 +35,7 @@ pub enum ChatResponse {
     Error(String),
 }
 
-pub type ChatResult<T> = std::result::Result<T, ChatError>;
+pub type ChatEvent<T> = std::result::Result<T, ChatError>;
 
 pub fn add(left: u64, right: u64) -> u64 {
     left + right

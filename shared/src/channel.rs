@@ -4,7 +4,7 @@ use tokio::net::TcpStream;
 use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json;
 
-use crate::{ChatCommand, ChatResponse, Message, ChatError, ChatResult};
+use crate::{ChatCommand, ChatResponse, Message, ChatError, ChatEvent};
 
 #[derive(Debug)]
 pub struct ChatClientChannel {
@@ -13,7 +13,7 @@ pub struct ChatClientChannel {
 }
 
 impl ChatClientChannel {
-    pub async fn connect(addr: &str) -> ChatResult<Self> {
+    pub async fn connect(addr: &str) -> ChatEvent<Self> {
         let connection = TcpStream::connect(addr)
             .await
             .map_err(|e| ChatError::Network(format!("failed to connect to {}: {}", addr, e)))?;
@@ -21,12 +21,12 @@ impl ChatClientChannel {
         Self::from_stream(connection)
     }
     
-    pub fn from_stream(socket: TcpStream) -> ChatResult<Self> {
+    pub fn from_stream(socket: TcpStream) -> ChatEvent<Self> {
         let (reader, writer) = socket.into_split();
         Ok(Self { writer, reader: BufReader::new(reader) })
     }
 
-    pub async fn send_bytes(&mut self, data: &mut Vec<u8>) -> ChatResult<()> {
+    pub async fn send_bytes(&mut self, data: &mut Vec<u8>) -> ChatEvent<()> {
         if !data.ends_with(&[b'\n']) {  
             data.push(b'\n');
         }
@@ -39,7 +39,7 @@ impl ChatClientChannel {
         Ok(())
     }
 
-    pub async fn send_message(&mut self, msg_body: &str) -> ChatResult<()> {
+    pub async fn send_message(&mut self, msg_body: &str) -> ChatEvent<()> {
         let msg = ChatCommand::SendMessage(Message {
             sender: "client".to_string(),
             content: msg_body.to_string(),
@@ -55,29 +55,27 @@ impl ChatClientChannel {
         self.send_bytes(&mut msg_bytes).await
     }
 
-    pub async fn receive_event(&mut self) -> ChatResult<ChatResponse> {
+    async fn receive_message<T>(&mut self) -> ChatEvent<T> 
+    where
+        T: serde::de::DeserializeOwned,
+    {
         let mut buffer = Vec::new();
 
         match self.reader.read_until(b'\n', &mut buffer).await {
             Ok(n) if n > 0 => {
                 serde_json::from_slice(&buffer)
-                    .map_err(|e| ChatError::Protocol(format!("failed to parse event: {}", e)))
+                    .map_err(|e| ChatError::Protocol(format!("failed to parse message: {}", e)))
             }
             Ok(_) => Err(ChatError::Network("connection closed".to_string())),
             Err(e) => Err(ChatError::Network(format!("failed to read from connection: {}", e))),
         }
     }
 
-    pub async fn receive_command(&mut self) -> ChatResult<ChatCommand> {
-        let mut buffer = Vec::new();
+    pub async fn receive_event(&mut self) -> ChatEvent<ChatResponse> {
+        self.receive_message().await
+    }
 
-        match self.reader.read_until(b'\n', &mut buffer).await {
-            Ok(n) if n > 0 => {
-                serde_json::from_slice(&buffer)
-                    .map_err(|e| ChatError::Protocol(format!("failed to parse command: {}", e)))
-            }
-            Ok(_) => Err(ChatError::Network("connection closed".to_string())),
-            Err(e) => Err(ChatError::Network(format!("failed to read from connection: {}", e))),
-        }
+    pub async fn receive_command(&mut self) -> ChatEvent<ChatCommand> {
+        self.receive_message().await
     }
 } 

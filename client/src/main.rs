@@ -1,8 +1,10 @@
+mod ui;
+
 use shared::ChatResponse;
 use shared::channel::ChatClientChannel;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tracing::{info, error};
 use eyre::Result;
+use ui::{ChatUI, UIMessage};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -17,56 +19,59 @@ async fn main() -> Result<()> {
         .await
         .map_err(|e| eyre::eyre!("failed to create chat client: {}", e))?;
 
-    // Create a buffer reader for stdin
-    let mut stdin = BufReader::new(tokio::io::stdin());
-    let mut input = String::new();
+    // Create and initialize the UI
+    let mut ui = ChatUI::new()?;
+    let message_tx = ui.message_tx();
+    let mut user_message_rx = ui.user_message_tx().subscribe();
 
-    loop {
-        tokio::select! {
-            // Handle user input
-            result = stdin.read_line(&mut input) => {
-                match result {
-                    Ok(_) => {
-                        let message = input.trim();
-                        if !message.is_empty() {
-                            if let Err(e) = client.send_message(message).await {
-                                error!("Failed to send message: {}", e);
-                                break;
-                            }
+    // Spawn a task to handle both server messages and client messages
+    let message_tx_clone = message_tx.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                // Handle server messages
+                result = client.receive_event() => {
+                    match result {
+                        Ok(ChatResponse::MessageReceived(msg)) => {
+                            let _ = message_tx_clone.send(UIMessage {
+                                content: msg.content,
+                                timestamp: chrono::Utc::now(),
+                            }).await;
                         }
-                        input.clear();
-                    }
-                    Err(e) => {
-                        error!("Error reading from stdin: {}", e);
-                        break;
+                        Ok(ChatResponse::Joined(user)) => {
+                            let _ = message_tx_clone.send(UIMessage {
+                                content: format!("User {} joined the chat", user),
+                                timestamp: chrono::Utc::now(),
+                            }).await;
+                        }
+                        Ok(ChatResponse::Left(user)) => {
+                            let _ = message_tx_clone.send(UIMessage {
+                                content: format!("User {} left the chat", user),
+                                timestamp: chrono::Utc::now(),
+                            }).await;
+                        }
+                        Ok(ChatResponse::Error(e)) => {
+                            error!("Server error: {}", e);
+                            break;
+                        }
+                        Err(e) => {
+                            error!("Error receiving event: {}", e);
+                            break;
+                        }
                     }
                 }
-            }
 
-            // Handle server messages
-            result = client.receive_event() => {
-                match result {
-                    Ok(ChatResponse::MessageReceived(msg)) => {
-                        info!("Received message: {}", msg.content);
-                    }
-                    Ok(ChatResponse::Joined(user)) => {
-                        info!("Joined chat as {}", user);
-                    }
-                    Ok(ChatResponse::Left(user)) => {
-                        info!("Left chat as {}", user);
-                    }
-                    Ok(ChatResponse::Error(e)) => {
-                        error!("Server error: {}", e);
-                        break;
-                    }
-                    Err(e) => {
-                        error!("Error receiving event: {}", e);
-                        break;
+                Ok(message) = user_message_rx.recv() => {
+                    if let Err(e) = client.send_message(&message).await {
+                        error!("Failed to queue message: {}", e);
                     }
                 }
             }
         }
-    }
+    });
+
+    // Run the UI
+    ui.run().await?;
 
     Ok(())
 }
