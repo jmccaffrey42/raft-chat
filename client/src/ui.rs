@@ -89,11 +89,9 @@ impl ChatUI {
                         KeyCode::Enter => {
                             if !self.input_buffer.is_empty() {
                                 let message = mem::take(&mut self.input_buffer);
-                                // Send the message to the client
                                 if let Err(e) = self.user_message_tx.send(message.clone()) {
                                     error!("Failed to send message: {}", e);
                                 }
-                                // Remove local echo - we'll only show messages when they come back from the server
                             }
                         }
                         KeyCode::Esc => break,
