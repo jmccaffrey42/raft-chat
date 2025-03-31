@@ -55,6 +55,13 @@ impl ChatClientChannel {
         self.send_bytes(&mut msg_bytes).await
     }
 
+    pub async fn send_command(&mut self, command: ChatCommand) -> ChatEvent<()> {
+        let mut cmd_bytes = serde_json::to_vec(&command)
+            .map_err(|e| ChatError::Protocol(format!("failed to serialize command: {}", e)))?;
+
+        self.send_bytes(&mut cmd_bytes).await
+    }
+
     async fn receive_message<T>(&mut self) -> ChatEvent<T> 
     where
         T: serde::de::DeserializeOwned,

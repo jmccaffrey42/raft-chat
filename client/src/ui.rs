@@ -8,9 +8,9 @@ use crossterm::{
 };
 use eyre::Result;
 use std::{
-    io::{self, Stdout, Write}, mem, time::Duration
+    io::{self, Stdout, Write}, mem, sync::Arc, time::Duration, sync::Mutex
 };
-use tokio::sync::{mpsc, broadcast};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::error;
 
 const MAX_MESSAGES: usize = 1000;
@@ -21,17 +21,60 @@ pub struct UIMessage {
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
+pub struct UIController {
+    message_tx: mpsc::Sender<UIMessage>,
+    user_message_tx: broadcast::Sender<String>,
+    user_message_rx: broadcast::Receiver<String>,
+    shutdown_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+}
+
+impl Clone for UIController {
+    fn clone(&self) -> Self {
+        Self {
+            message_tx: self.message_tx.clone(),
+            user_message_tx: self.user_message_tx.clone(),
+            user_message_rx: self.user_message_tx.subscribe(),
+            shutdown_tx: self.shutdown_tx.clone(),
+        }
+    }
+}
+
+impl UIController {
+    pub async fn send_message(&self, message: UIMessage) -> Result<()> {
+        self.message_tx.send(message).await
+            .map_err(|e| eyre::eyre!("Failed to send message: {}", e))
+    }
+
+    pub async fn recv_user_message(&mut self) -> Result<String> {
+        let message = self.user_message_rx.recv().await
+            .map_err(|e| eyre::eyre!("Failed to receive user message: {}", e))?;
+
+        Ok(message)
+    }
+
+    pub async fn shutdown(&self) -> Result<()> {
+        let mut lock = self.shutdown_tx.lock()
+            .map_err(|_| eyre::eyre!("Failed to acquire lock"))?;
+        
+        if let Some(tx) = lock.take() {
+            tx.send(()).map_err(|_| eyre::eyre!("Failed to send shutdown signal"))
+        } else {
+            Err(eyre::eyre!("Shutdown signal already sent"))
+        }
+    }
+}
+
 pub struct ChatUI {
     messages: Vec<UIMessage>,
     input_buffer: String,
     stdout: Stdout,
-    message_tx: mpsc::Sender<UIMessage>,
     message_rx: mpsc::Receiver<UIMessage>,
+    shutdown_rx: oneshot::Receiver<()>,
     user_message_tx: broadcast::Sender<String>,
 }
 
 impl ChatUI {
-    pub fn new() -> Result<Self> {
+    pub fn new() -> Result<(Self, UIController)> {
         // Check if we're running in a terminal
         if !io::stdout().is_tty() {
             return Err(eyre::eyre!("Not running in a terminal"));
@@ -43,28 +86,27 @@ impl ChatUI {
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
 
         // Create channels for message passing
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let (message_tx, message_rx) = mpsc::channel(100);
         let (user_message_tx, _) = broadcast::channel(100);
 
-        Ok(Self {
+        Ok((Self {
             messages: Vec::with_capacity(MAX_MESSAGES),
             input_buffer: String::new(),
             stdout,
-            message_tx,
             message_rx,
-            user_message_tx,
-        })
+            shutdown_rx,
+            user_message_tx: user_message_tx.clone(),
+        },
+        UIController {
+            message_tx,
+            user_message_tx: user_message_tx.clone(),
+            user_message_rx: user_message_tx.subscribe(),
+            shutdown_tx: Arc::new(Mutex::new(Some(shutdown_tx))),
+        }))
     }
 
-    pub fn message_tx(&self) -> mpsc::Sender<UIMessage> {
-        self.message_tx.clone()
-    }
-
-    pub fn user_message_tx(&self) -> broadcast::Sender<String> {
-        self.user_message_tx.clone()
-    }
-
-    pub async fn run(&mut self) -> Result<()> {
+    pub fn run(&mut self) -> Result<()> {
         // Hide cursor and clear screen
         execute!(self.stdout, Hide)?;
         self.clear_screen()?;
@@ -75,6 +117,7 @@ impl ChatUI {
 
             // Handle events
             if event::poll(Duration::from_millis(100))? {
+            // if event::poll(Duration::ZERO)? {
                 if let Event::Key(key) = event::read()? {
                     match key.code {
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -98,6 +141,11 @@ impl ChatUI {
                         _ => {}
                     }
                 }
+            } 
+
+            // check if the shutdown signal has been sent
+            if let Ok(_) = self.shutdown_rx.try_recv() {
+                break;
             }
 
             // Check for new messages
